@@ -91,6 +91,7 @@ def write_http_conf(domain: str) -> str:
     content = f"""# Port 80 - redirect HTTP to HTTPS
 <VirtualHost *:80>
     ServerName {domain}
+    ServerAlias www.{domain}
 
     RewriteEngine On
     RewriteRule ^ https://%{{SERVER_NAME}}%{{REQUEST_URI}} [L,R=301]
@@ -191,7 +192,6 @@ def run_certbot(domain: str, http_conf: str, ssl_conf: str) -> None:
             f"www.{domain}",
             "--non-interactive",
             "--agree-tos",
-            "--redirect",
         ],
         text=True,
     )
@@ -293,18 +293,20 @@ class TestAddProxySite(unittest.TestCase):
         self.expected_ip = "13.204.103.142"
 
     @patch("builtins.open", new_callable=MagicMock)
+    @patch("builtins.open")
     def test_write_http_conf_exact_template(self, mock_open):
         # Call the function (it won't actually write, but generates content)
+        mock_file = mock_open.return_value.__enter__.return_value
         with patch("os.path.join", return_value="/fake/path.conf"):
             http_conf = write_http_conf(self.example_domain)
 
-        # Handle: mock the file write to capture content
-        handle = mock_open.return_value.__enter__.return_value
-        written_content = handle.write.call_args[0][0]
+        # Capture written content
+        written_content = mock_file.write.call_args[0][0]
 
         expected_content = f"""# Port 80 - redirect HTTP to HTTPS
 <VirtualHost *:80>
     ServerName {self.example_domain}
+    ServerAlias www.{self.example_domain}
 
     RewriteEngine On
     RewriteRule ^ https://%{{SERVER_NAME}}%{{REQUEST_URI}} [L,R=301]
@@ -368,12 +370,15 @@ SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
 
     @patch("socket.getaddrinfo")
     def test_check_dns_passes(self, mock_getaddrinfo):
-        # Mock successful DNS resolution to expected IP
+        # Mock successful DNS resolution to expected IP (real getaddrinfo tuple format)
         mock_getaddrinfo.return_value = [
-            MagicMock(),  # Dummy results
-            MagicMock(
-                family=2, type=1, proto=0, canonname="", sockaddr=("13.204.103.142",)
-            ),
+            (
+                2,
+                1,
+                6,
+                "",
+                ("13.204.103.142", 0),
+            ),  # (family, type, proto, canonname, sockaddr)
         ]
         check_dns(self.example_domain)
         mock_getaddrinfo.assert_called_once_with(self.example_domain, None)
@@ -382,7 +387,7 @@ SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
     def test_check_dns_fails_wrong_ip(self, mock_getaddrinfo):
         # Mock resolution to wrong IP
         mock_getaddrinfo.return_value = [
-            MagicMock(family=2, type=1, proto=0, canonname="", sockaddr=("wrong.ip",))
+            (2, 1, 6, "", ("wrong.ip", 0)),
         ]
         with self.assertRaises(SystemExit):
             check_dns(self.example_domain)
@@ -398,7 +403,7 @@ SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
     @patch("os.path.join")
     def test_check_no_existing_config_passes(self, mock_join, mock_exists):
         check_no_existing_config(self.example_domain)
-        mock_exists.assert_called()  # Called twice for the two files
+        self.assertEqual(mock_exists.call_count, 2)  # Called twice for the two files
 
     @patch("os.path.exists", side_effect=[True, False])  # Simulate one existing file
     def test_check_no_existing_config_fails(self, mock_exists):
@@ -407,12 +412,15 @@ SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
 
     @patch("subprocess.run")
     def test_rollback_cleans_up(self, mock_run):
-        # Mock os.remove and commands
-        with patch("os.path.exists", return_value=True), patch("os.remove"):
+        # Mock os.path.exists and os.remove
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.remove") as mock_remove,
+        ):
             _rollback(self.example_domain, "http.conf", "ssl.conf")
-        # Verify a2dissite and remove called for both
-        self.assertEqual(mock_run.call_count, 3)  # 2x a2dissite + 1x reload
-        os.remove.assert_called()  # Called implicitly via patch
+        # Verify a2dissite called twice + reload once
+        self.assertEqual(mock_run.call_count, 3)
+        mock_remove.assert_called()  # Called twice, once per conf
 
 
 if __name__ == "__main__":
