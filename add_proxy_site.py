@@ -6,6 +6,10 @@ Uses EXACT templates from iskcontirupati.conf and iskcontirupati-le-ssl.conf.
 Usage:
     sudo python3 add_proxy_site.py [domain]
 Run tests: python3 -m unittest add_proxy_site -v
+
+Note: Certbot is skipped (commented out) — run manually after Apache reload:
+  - For new cert: sudo certbot --apache -d {domain} -d www.{domain}
+  - For existing cert: sudo certbot install --apache --cert-name {domain} -d {domain} -d www.{domain}
 """
 
 import argparse
@@ -14,7 +18,7 @@ import socket
 import subprocess
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 EXPECTED_IP = "13.204.103.142"
@@ -40,7 +44,7 @@ def run(cmd: list[str], check=True) -> subprocess.CompletedProcess:
 
 
 def check_dns(domain: str) -> None:
-    print(f"\n[1/5] DNS check: '{domain}' must resolve to {EXPECTED_IP}")
+    print(f"\n[1/4] DNS check: '{domain}' must resolve to {EXPECTED_IP}")
     try:
         results = socket.getaddrinfo(domain, None)
         resolved_ips = {r[4][0] for r in results}
@@ -155,11 +159,11 @@ SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
 
 
 def enable_and_reload(domain: str, http_conf: str, ssl_conf: str) -> None:
-    print(f"\n[3/5] Enabling sites")
+    print(f"\n[3/4] Enabling sites")
     run(["a2ensite", http_conf])
     run(["a2ensite", ssl_conf])
 
-    print("\n[4/5] Validating Apache config before reload")
+    print("\n[4/4] Validating Apache config before reload")
     result = subprocess.run(
         ["apache2ctl", "configtest"], capture_output=True, text=True
     )
@@ -181,32 +185,40 @@ def enable_and_reload(domain: str, http_conf: str, ssl_conf: str) -> None:
 
 
 def run_certbot(domain: str, http_conf: str, ssl_conf: str) -> None:
-    print(f"\n[5/5] Running Certbot for {domain}")
-    result = subprocess.run(
-        [
-            "certbot",
-            "--apache",
-            "-d",
-            domain,
-            "-d",
-            f"www.{domain}",
-            "--non-interactive",
-            "--agree-tos",
-        ],
-        text=True,
-    )
-
-    if result.returncode != 0:
-        print(
-            "✖  Certbot failed. The site has been rolled back.\n"
-            "   Check the certbot logs: journalctl -u certbot  or  /var/log/letsencrypt/letsencrypt.log"
-        )
-        _rollback(domain, http_conf, ssl_conf)
-        sys.exit(1)
-
+    """
+    COMMENTED OUT: Certbot skipped — run manually after script completes.
+    For new cert: sudo certbot --apache -d {domain} -d www.{domain}
+    For existing cert: sudo certbot install --apache --cert-name {domain} -d {domain} -d www.{domain}
+    """
     print(
-        "✔  Certificate issued — Certbot updated the SSL config (exact template match)"
+        "\n[5/5 SKIPPED] Certbot — run manually as noted above.\n"
+        "   The site is now enabled with snakeoil cert (self-signed). Update with Certbot next."
     )
+    # Uncomment below to re-enable automation:
+    # print(f"\n[5/5] Running Certbot for {domain}")
+    # result = subprocess.run(
+    #     [
+    #         "certbot",
+    #         "--apache",
+    #         "-d", domain,
+    #         "-d", f"www.{domain}",
+    #         "--non-interactive",
+    #         "--agree-tos",
+    #     ],
+    #     text=True,
+    # )
+    #
+    # if result.returncode != 0:
+    #     print(
+    #         "✖  Certbot failed. The site has been rolled back.\n"
+    #         "   Check the certbot logs: journalctl -u certbot  or  /var/log/letsencrypt/letsencrypt.log"
+    #     )
+    #     _rollback(domain, http_conf, ssl_conf)
+    #     sys.exit(1)
+    #
+    # print(
+    #     "✔  Certificate issued — Certbot updated the SSL config (exact template match)"
+    # )
 
 
 # ─── ROLLBACK ────────────────────────────────────────────────────────────────
@@ -273,14 +285,16 @@ def main() -> None:
     check_dns(domain)  # 1. DNS check
     check_no_existing_config(domain)  # 2. Safety guard
 
-    print("\n[2/5] Writing Apache config files")
+    print("\n[2/4] Writing Apache config files")
     http_conf = write_http_conf(domain)  # 3. HTTP conf
     ssl_conf = write_ssl_conf(domain, backend)  # 4. SSL conf
 
     enable_and_reload(domain, http_conf, ssl_conf)  # 5+6. Enable + configtest + reload
-    run_certbot(domain, http_conf, ssl_conf)  # 7. Certbot
+    # run_certbot(domain, http_conf, ssl_conf)  # COMMENTED OUT — manual Certbot
 
-    print(f"\n🎉  Done! https://{domain} is live, proxying to {backend}.")
+    print(
+        f"\n🎉  Done! https://{domain} is enabled (with snakeoil cert). Run Certbot manually to add SSL."
+    )
 
 
 # ─── UNIT TESTS ─────────────────────────────────────────────────────────────
@@ -292,7 +306,6 @@ class TestAddProxySite(unittest.TestCase):
         self.example_backend = "www.temples.bio"
         self.expected_ip = "13.204.103.142"
 
-    @patch("builtins.open", new_callable=MagicMock)
     @patch("builtins.open")
     def test_write_http_conf_exact_template(self, mock_open):
         # Call the function (it won't actually write, but generates content)
@@ -319,15 +332,15 @@ RewriteRule ^ https://%{{SERVER_NAME}}%{{REQUEST_URI}} [END,NE,R=permanent]
         self.assertEqual(written_content, expected_content)
         self.assertEqual(http_conf, f"{self.example_domain}.conf")
 
-    @patch("builtins.open", new_callable=MagicMock)
+    @patch("builtins.open")
     def test_write_ssl_conf_exact_template(self, mock_open):
         # Call the function
+        mock_file = mock_open.return_value.__enter__.return_value
         with patch("os.path.join", return_value="/fake/path-le-ssl.conf"):
             ssl_conf = write_ssl_conf(self.example_domain, self.example_backend)
 
         # Capture written content
-        handle = mock_open.return_value.__enter__.return_value
-        written_content = handle.write.call_args[0][0]
+        written_content = mock_file.write.call_args[0][0]
 
         expected_content = f'''<IfModule mod_ssl.c>
 <VirtualHost *:443>
